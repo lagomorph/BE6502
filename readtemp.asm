@@ -118,10 +118,35 @@ start:
   sta T1CH        ; starts timer
   lda #%11000000  ; enable timer 1 interrupt
   sta IER
-  cli
 
-- wai             ; looks like 9 clocks to start irq handler
-  bra -
+; 1) temp measurement and line 1 display when intCount % 16 == 0
+; 2) line 2 display when intCount % 16 == 1
+; display low nybble of intCount every int
+; there is easily enough time to do 1 and 2 at once though
+; 1 takes about 5ms, 2 takes about 2.5ms, and there are about 65.5ms between ints
+; other 14 of 16 interrupts just to show the interrupt counter takes about .28ms
+loop:
+  wai
+  lda T1CL  ; 4, resets interrupt flag
+  inc intCount
+  lda intCount
+  and #$0f
+  bne +
+  jsr readTemp
+  jsr validateTemp
+  jsr updateTemps
+  jsr updateDisplayLine1
+  bra ++
++ cmp #$01
+  bne ++
+  jsr updateDisplayLine2
+++lda #%10001111  ; go to last col on 1st line
+  jsr lcdCommand
+  lda intCount
+  and #$0f
+  jsr hexDigit
+  jsr displayByte
+  bra loop
 
 readTemp:
   jsr sendStart
@@ -338,8 +363,10 @@ error:
   ora #%00000100  ; LED on
   sta PORTA
   jsr sendStop
-  sei
-- bra -
+  lda #%01000000  ; disable timer 1 interrupt
+  sta IER
+- wai
+  bra -  ; just in case
 
 sendStart:
   lda PORTA
@@ -516,34 +543,7 @@ displayString:
 nmi:
   rti
 
-; 1) temp measurement and line 1 display when intCount % 16 == 0
-; 2) line 2 display when intCount % 16 == 1
-; display low nybble of intCount every int
-; there is easily enough time to do 1 and 2 at once though
-; 1 takes about 5ms, 2 takes about 2.5ms, and there are about 65.5ms between ints
-; other 14 of 16 interrupts just to show the interrupt counter takes about .3ms
 irq:
-  pha       ; 3
-  lda T1CL  ; 4, resets interrupt flag
-  inc intCount
-  lda intCount
-  and #$0f
-  bne +
-  jsr readTemp
-  jsr validateTemp
-  jsr updateTemps
-  jsr updateDisplayLine1
-  bra ++
-+ cmp #$01
-  bne ++
-  jsr updateDisplayLine2
-++lda #%10001111  ; go to last col on 1st line
-  jsr lcdCommand
-  lda intCount
-  and #$0f
-  jsr hexDigit
-  jsr displayByte
-  pla
   rti
 
 .minText !text "min: ", 0
