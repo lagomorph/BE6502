@@ -26,15 +26,17 @@
 
 ; 65C22 pin2: data
 ; 65C22 pin3: clock
-; 65C22 pin4: LED (anode)
+; 65C22 pin4: errorLED (anode)
+; 65C22 pin5: downLED (anode)
+; 65C22 pin6: upLED (anode)
 
 ; circuit notes:
 ; 4.7kΩ weak pullup on data line to make sure we're seeing DS1624 pulling down line on ACKs
 ; This may be unnecessary but it's not clear from the datasheet if this is left floating or not.
 ; 820Ω resistor (any reasonable value) between data line on DS1624 and 65C22 just for extra safety
-; LED with anode on pin 4 and cathode to ground via 220Ω resistor
+; LEDs with anodes on pins 4, 5, 6 and cathodes to ground via appropriate dropping resistors
 ; The Dallas and Maxim datasheets are inconsistent as to whether we get 4 or 5 bits of
-; fractional temp. We're getting 5 with this particular chip.
+; fractional temp. We're getting 5 with this particular chip (Dallas).
 ; In continuous conversion mode the done flag is never set. This isn't in the datasheets but
 ; found in a Dallas app note. We're waiting over a second anyway so it should be done.
 
@@ -60,26 +62,30 @@ STARTCONVERT = $ee
 READTEMP = $aa
 
 intCount = $00
-lastTemp = $01
-lowTemp = $03
-highTemp = $05
-message = $07
-displayTempVal = $09
+currTemp = $01
+lastTemp = $03
+lowTemp = $05
+highTemp = $07
+message = $09
+displayTempVal = $0b
 
 * = $8000
 
 start:
   lda #%11111111  ; set all pins on port B to output
   sta DDRB
-
-  lda #%11100111  ; set top 3 pins on port A to output, bottom three for LED, DS1624 clock, data
+                  ; set all pins on port A to output, top 3 pins (E, RW, RS),
+                  ; upLED, downLED, bottom three pins (errorLED, DS1624 clock, data)
   sta DDRA
 
   ldx #$ff
   txs
 
+  ldx #$80
+  stx lastTemp    ; out of range value that indicates "none"
+
   lda PORTA
-  and #%11111001  ; LED, clock low
+  and #%11100001  ; upLED, downLED, errorLED, clock low
   sta PORTA
 
   lda #%00111000 ; set 8-bit mode; 2-line display; 5x8 font
@@ -134,7 +140,8 @@ loop:
   bne +
   jsr readTemp
   jsr validateTemp
-  jsr updateTemps
+  jsr updateHighLowTemps
+  jsr updateUpDownLEDs
   jsr updateDisplayLine1
   bra ++
 + cmp #$01
@@ -159,15 +166,15 @@ readTemp:
   jsr sendByte
   lda #$00        ; ACK
   jsr receiveByte
-  sta lastTemp
+  sta currTemp
   lda #$01        ; NAK
   jsr receiveByte
-  sta lastTemp+1
+  sta currTemp+1
   jsr sendStop
   rts
 
 validateTemp:
-  lda lastTemp+1
+  lda currTemp+1
   and #$07
   beq +
   jsr updateDisplayLine1
@@ -181,45 +188,80 @@ validateTemp:
   jmp error
 + rts
 
-updateTemps:
-  lda highTemp+1  ; highTemp-lastTemp
-  cmp lastTemp+1
+updateHighLowTemps:
+  lda highTemp+1  ; highTemp-currTemp
+  cmp currTemp+1
   lda highTemp
-  sbc lastTemp
+  sbc currTemp
   bvc +  ; N eor V
   eor #$80
 + bpl +
-  lda lastTemp
+  lda currTemp
   sta highTemp
-  lda lastTemp+1
+  lda currTemp+1
   sta highTemp+1
 
-+ lda lastTemp+1  ; lastTemp-lowTemp
++ lda currTemp+1  ; currTemp-lowTemp
   cmp lowTemp+1
-  lda lastTemp
+  lda currTemp
   sbc lowTemp
   bvc +  ; N eor V
   eor #$80
 + bpl +
-  lda lastTemp
+  lda currTemp
   sta lowTemp
-  lda lastTemp+1
+  lda currTemp+1
   sta lowTemp+1
 + rts
+
+updateUpDownLEDs:
+  lda lastTemp
+  cmp #$80
+  beq ++  ; no lastTemp
+  lda lastTemp+1  ; lastTemp-currTemp
+  cmp currTemp+1
+  lda lastTemp
+  sbc currTemp
+  bvc +  ; N eor V
+  eor #$80
++ bpl +  ; lastTemp >= currTemp
+  ; up
+  lda PORTA
+  ora #%00010000
+  and #%11110111
+  sta PORTA
+  bra ++
++ lda lastTemp
+  cmp currTemp
+  bne +
+  lda lastTemp+1
+  cmp currTemp+1
+  beq ++
+  ; down
++ lda PORTA
+  ora #%00001000
+  and #%11101111
+  sta PORTA
+; end
+++lda currTemp
+  sta lastTemp
+  lda currTemp+1
+  sta lastTemp+1
+  rts
 
 updateDisplayLine1:
   lda #%00000010  ; home display
   jsr lcdCommand
-  lda lastTemp
+  lda currTemp
   jsr displayHex
-  lda lastTemp+1
+  lda currTemp+1
   jsr displayHex
   lda #' '
   jsr displayByte
 
-  lda lastTemp
+  lda currTemp
   sta displayTempVal
-  lda lastTemp+1
+  lda currTemp+1
   sta displayTempVal+1
   jsr displayTemp
   rts
@@ -360,7 +402,7 @@ displayTemp:
 
 error:
   lda PORTA
-  ora #%00000100  ; LED on
+  ora #%00000100  ; errorLED on
   sta PORTA
   jsr sendStop
   lda #%01000000  ; disable timer 1 interrupt
@@ -393,7 +435,7 @@ sendStop:
 sendByte:
   phx
   phy
-  ldx #%11100111  ; data is an output
+  ldx #%11111111  ; data is an output
   stx DDRA
   ldx PORTA
   ldy #$08
@@ -424,7 +466,7 @@ receiveByte:
   phx
   phy
   pha
-  lda #%11100110  ; data is an input
+  lda #%11111110  ; data is an input
   sta DDRA
   ldy #$08
   lda PORTA
@@ -449,7 +491,7 @@ _receiveBit:
   rts
 
 checkAck:
-  lda #%11100110  ; data is an input
+  lda #%11111110  ; data is an input
   sta DDRA
   lda PORTA
   ora #%00000010  ; clock high
@@ -458,19 +500,19 @@ checkAck:
   and #%11111101  ; clock low
   sta PORTA
   ror             ; ack bit returned in carry
-  lda #%11100111  ; data is an output
+  lda #%11111111  ; data is an output
   sta DDRA
   rts
 
 sendAckNak:
   beq _sendAck
-  lda #%11100111  ; data is an output
+  lda #%11111111  ; data is an output
   sta DDRA
   lda PORTA
   ora #%00000001  ; data high
   bra +
 _sendAck:
-  lda #%11100111  ; data is an output
+  lda #%11111111  ; data is an output
   sta DDRA
   lda PORTA
   and #%11111110  ; data low
